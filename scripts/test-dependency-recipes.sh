@@ -71,11 +71,61 @@ assert_reset() {
 	[ -d "$prefix/etc/cget/recipes/open62541" ]
 }
 
+assert_fingerprint_failure() (
+	# Run the real helper in a separate shell so its exit cannot stop this test.
+	export prefix config depdir extradepdir FBE_FORTE_SOURCE_DIR
+	export RECIPE_TEST_HELPERS="$tmp/helpers.sh" RECIPE_TEST_TOOL="$1" RECIPE_TEST_OUTPUT="$2"
+	export RECIPE_TEST_REAL_TOOL="$(command -v "$1")"
+	export RECIPE_TEST_COMMAND="$tmp/failing-tools/$1"
+	mkdir -p "$tmp/failing-tools"
+	cat > "$tmp/failing-tools/$1" <<'EOF'
+#!/bin/sh
+case "$RECIPE_TEST_TOOL:$2:$3" in
+	cmake:sha256sum:libressl/*|find:libressl/:*|sort:*)
+		[ "$RECIPE_TEST_OUTPUT" != partial ] || printf '%s\n' 'incomplete output'
+		echo "Injected $RECIPE_TEST_TOOL failure" >&2
+		exit 1;;
+esac
+exec "$RECIPE_TEST_REAL_TOOL" "$@"
+EOF
+	chmod +x "$tmp/failing-tools/$1"
+	cat > "$tmp/check-fingerprints.sh" <<'EOF'
+#!/bin/sh
+set -e
+. "$RECIPE_TEST_HELPERS"
+die() { echo "$*" >&2; exit 1; }
+# BusyBox can dispatch its applets without consulting PATH.
+case "$RECIPE_TEST_TOOL" in
+	find) find() { sh "$RECIPE_TEST_COMMAND" "$@"; };;
+	sort) sort() { sh "$RECIPE_TEST_COMMAND" "$@"; };;
+esac
+reset_dependencies_if_changed
+EOF
+	cp "$prefix/.fbe/recipes.cksum" "$tmp/before-failure.cksum"
+	if PATH="$tmp/failing-tools:$PATH" sh "$tmp/check-fingerprints.sh" > "$tmp/failure.log" 2>&1; then
+		die "Fingerprinting unexpectedly succeeded after a $1 failure ($2)."
+	fi
+	grep -q "Injected $1 failure" "$tmp/failure.log"
+	grep -q 'Could not .*dependency recipe fingerprints' "$tmp/failure.log"
+	assert_preserved
+	cmp "$tmp/before-failure.cksum" "$prefix/.fbe/recipes.cksum"
+	rm "$tmp/failing-tools/$1"
+)
+
 select_version 1.5.4
 prepare
 # Recording FBE metadata must not create cget's private state directory.
 [ ! -d "$prefix/cget" ]
 installed
+prepare
+assert_preserved
+
+# Failures must not delete installed files or replace the saved fingerprints.
+# libressl is visited before open62541, so later success must not hide an error.
+assert_fingerprint_failure cmake empty
+assert_fingerprint_failure cmake partial
+assert_fingerprint_failure find partial
+assert_fingerprint_failure sort partial
 prepare
 assert_preserved
 
