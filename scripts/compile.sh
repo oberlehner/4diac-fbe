@@ -199,15 +199,22 @@ reset_dependencies_if_changed() {
 	local checksums recipe
 	local checksum_file="$prefix/.fbe/recipes.cksum"
 	checksums="$(
-		cd "$prefix/etc/cget/recipes"
+		cd "$prefix/etc/cget/recipes" || exit 1
 		while IFS= read -r recipe; do
 			case "$recipe" in
 				""|forte|*@*) continue;;
 			esac
 			[ -d "$recipe" ] || continue
-			find -L "$recipe/" -type f -exec cmake -E sha256sum {} \;
-		done < "$prefix/.fbe/recipes.list" | sort
-	)"
+			# The + form propagates a failed hash command through find.
+			find -L "$recipe/" -type f -exec sh -c '
+				for file do
+					cmake -E sha256sum "$file" || exit 1
+				done
+			' sh {} + || exit 1
+		done < "$prefix/.fbe/recipes.list"
+	)" || die "Could not calculate dependency recipe fingerprints for '$config'."
+	# Sort only after traversal and every hash have succeeded.
+	checksums="$(printf '%s\n' "$checksums" | sort)" || die "Could not sort dependency recipe fingerprints for '$config'."
 
 	if [ -d "$prefix/cget" ] && { [ ! -f "$checksum_file" ] || [ "$(cat "$checksum_file")" != "$checksums" ]; }; then
 		echo "Dependency recipes have changed. Rebuilding configuration '$config'."
